@@ -1,0 +1,57 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    
+    // --- PUBLIC DATA ---
+    
+    // The public live queue (includes financial data: fee, status, completedAt)
+    match /artifacts/{appId}/public/data/queue/{docId} {
+      allow read: if request.auth != null;
+      // Allow authenticated users to create queue entries
+      allow create: if request.auth != null;
+      // Only admin can update (to add fee, notes, mark as seen/completed)
+      allow update: if request.auth.token.email == "prajansanjayko@gmail.com";
+      allow delete: if request.auth.token.email == "prajansanjayko@gmail.com";
+    }
+    
+    // Clinic status (daily limit)
+    match /artifacts/{appId}/public/data/clinicStatus/{docId} {
+      allow read: if request.auth != null;
+      allow write: if request.auth.token.email == "prajansanjayko@gmail.com";
+    }
+    
+    // Clinic settings (location coordinates, max distance)
+    match /artifacts/{appId}/public/data/clinicSettings/{docId} {
+      // All authenticated users can read clinic settings
+      allow read: if request.auth != null;
+      // Only admin can write clinic settings
+      allow write: if request.auth.token.email == "prajansanjayko@gmail.com";
+    }
+    
+    // --- PRIVATE USER DATA ---
+    
+    // A user's private visit history
+    match /artifacts/{appId}/users/{userId}/visits/{visitId} {
+      allow read: if request.auth.uid == userId;
+      allow create: if request.auth.token.email == "prajansanjayko@gmail.com";
+      allow update, delete: if false;
+    }
+    
+    // A user's private profile (name, mobile)
+    match /artifacts/{appId}/users/{userId}/profile/details {
+      allow read, write: if request.auth.uid == userId;
+    }
+    
+    // Future Appointments
+    match /appointments/{aptId} {
+      // Admin OR Patient can read
+      allow read: if request.auth.token.email == "prajansanjayko@gmail.com" || request.auth.uid == resource.data.patientId;
+      // A patient can create their own appointments
+      allow create: if request.auth.uid == request.resource.data.patientId;
+      // No one can update or delete
+      allow update, delete: if false;
+    }
+    
+  }
+}
+
