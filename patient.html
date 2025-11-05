@@ -3,41 +3,76 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#3b82f6" />
+    <!-- FIX: Use absolute paths -->
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/icon-192x192.png">
     <title>MediQueue - Patient Dashboard</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/tone/14.8.49/Tone.js"></script>
+    <!-- NEW: QR Scanner Library -->
+    <script src="https://unpkg.com/html5-qrcode@2.3.8/html5-qrcode.min.js"></script>
     <style>
         @keyframes fadeIn {
             from { opacity: 0; transform: translateY(-10px); }
             to { opacity: 1; transform: translateY(0); }
         }
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
         .animate-fade-in {
             animation: fadeIn 0.3s ease-out;
         }
-        .custom-scrollbar::-webkit-scrollbar {
-            width: 8px;
+        .animate-spin-fast {
+            animation: spin 0.8s linear infinite;
         }
-        .custom-scrollbar::-webkit-scrollbar-track {
-            background: #f1f1f1;
-            border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb {
-            background: linear-gradient(to bottom, #3b82f6, #8b5cf6);
-            border-radius: 10px;
-        }
-        .custom-scrollbar::-webkit-scrollbar-thumb:hover {
-            background: linear-gradient(to bottom, #2563eb, #7c3aed);
-        }
+        .custom-scrollbar::-webkit-scrollbar { width: 8px; }
+        .custom-scrollbar::-webkit-scrollbar-track { background: #f1f1f1; border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb { background: linear-gradient(to bottom, #3b82f6, #8b5cf6); border-radius: 10px; }
+        .custom-scrollbar::-webkit-scrollbar-thumb:hover { background: linear-gradient(to bottom, #2563eb, #7c3aed); }
         body {
-            background: linear-gradient(to bottom right, #f8fafc, #e0e7ff);
+            background-color: #f8fafc; /* A light, clean gray */
             min-height: 100vh;
         }
-        /* Style for the active bottom nav item */
-        .bottom-nav-active {
-            color: #2563eb; /* blue-600 */
+        .bottom-nav-active { color: #2563eb; }
+        .bottom-nav-active svg { transform: scale(1.1); }
+
+        /* QR Scanner Modal Style */
+        #qr-scanner-modal {
+            background-color: rgba(0, 0, 0, 0.8);
+            backdrop-filter: blur(5px);
+            -webkit-backdrop-filter: blur(5px);
         }
-        .bottom-nav-active svg {
-            transform: scale(1.1);
+        #qr-reader {
+            width: 90vw;
+            max-width: 400px;
+            background: white;
+            border-radius: 1.5rem; /* 24px */
+            overflow: hidden;
+        }
+        #qr-reader-region {
+            border: none !important;
+        }
+    </style>
+
+    <style>
+        /* --- Mobile App-like Optimizations --- */
+        body, html {
+            overscroll-behavior-y: contain;
+        }
+        input[type="text"],
+        input[type="tel"],
+        input[type="date"],
+        textarea,
+        select {
+            font-size: 16px !important;
+        }
+        button,
+        #bottom-nav > button {
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            -webkit-user-select: none; /* Safari */
         }
     </style>
     <script type="module">
@@ -62,8 +97,11 @@
             doc,
             setDoc,
             getDoc,
+            getDocs, // <-- Added getDocs
+            updateDoc, // <-- Added updateDoc
             orderBy,
-            Timestamp
+            Timestamp,
+            collectionGroup
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- App Configuration ---
@@ -78,50 +116,57 @@
         };
         const appId = firebaseConfig.projectId;
         
-        let CLINIC_COORDS = { latitude: 12.94320783333333, longitude: 80.15839316666666 };
-        let MAX_DISTANCE_METERS = 100000;
+        // --- REMOVED GEOLOCATION CONFIG ---
         const ADMIN_EMAIL = "prajansanjayko@gmail.com";
+        const DAILY_PASS_KEY = 'mediqueue_daily_pass'; // Key for localStorage
 
         // --- Initialization ---
         window.onload = async () => {
+            // --- PWA Service Worker Registration ---
+            if ('serviceWorker' in navigator) {
+                try {
+                    // FIX: Use an absolute path for the service worker
+                    await navigator.serviceWorker.register('/sw.js');
+                    console.log('Service Worker registered successfully');
+                } catch (err) {
+                    console.error('Service Worker registration failed:', err);
+                }
+            }
+            // --- PWA Install Prompt ---
+            let deferredInstallPrompt = null;
 
+            // DOM Elements
             let app, db, auth;
             let patientApp;
             let patientPages = {};
-
-            // --- Navigation Elements ---
-            let mainNav, authControls, userDisplay, logoutBtn; // Simplified top nav
-            
-            // --- Bottom Nav Elements ---
-            let bottomNav, bottomNavBook, bottomNavAppointments, bottomNavHistory, bottomNavProfile;
+            let mainNav, authControls, userDisplay, logoutBtn, welcomeHeader;
+            let bottomNav, bottomNavDashboard, bottomNavAppointments, bottomNavHistory, bottomNavProfile;
             let bottomNavItems = []; 
-
-            // Patient: Live Queue (Book)
-            let distanceEl, geoStatusEl, bookingForm, joinQueueBtn, patientNameInput, patientMobileInput, patientIssueInput;
+            let dashboardWelcome, dashboardShortcuts, dashboardJoinQueueBtn, dashboardScanQRBtn; // <-- Added Scan Button
             let queueStatusSection, queueMessageEl, queueNumberEl, queueEstimateEl, queueClosedMsg;
-
-            // Patient: Visit History
+            let queueScanCheckinBtn; // <-- NEW: Button on "En Route" card
+            let joinQueueModal, joinQueueModalClose, joinQueueForm, joinQueueBtnModal, patientNameInput, patientMobileInput, patientIssueInput;
+            let modalStepForm, modalStepError, modalErrorMsg;
             let historyList, historyMsg;
-
-            // Patient: Appointments
             let aptDateInput, aptTimeSelect, aptReasonInput, aptBookBtn, myAptList, myAptMsg;
-
-            // Patient: Profile
-            let profileNameInput, profileMobileInput, profileUpdateBtn, profileMsg, mobileLogoutBtn;
-            
+            let profileNameInput, profileMobileInput, profileUpdateBtn, profileMsg, mobileLogoutBtn, installPwaBtn;
             let loadingOverlay, modal, modalMessage, modalCloseBtn;
+
+            // --- NEW: QR Scanner Modal ---
+            let qrScannerModal, qrScannerCloseBtn;
+            let html5QrScanner; // This will hold the scanner object
 
             // App State
             let currentUserId = null, currentUserEmail = null, currentUserDisplayName = null;
             let isAuthReady = false;
             let myQueueUnsubscribe = null, historyUnsubscribe = null, clinicStatusUnsubscribe = null;
             let patientQueueCountUnsubscribe = null, myAppointmentsUnsubscribe = null, profileUnsubscribe = null;
-            
             let currentDailyLimit = 999; 
-            let geoWatchId = null;
             let hasPlayedSound = false;
             let notificationSynth = null;
-
+            let clinicPasscode = null; 
+            let joinMode = 'pre_registered'; // Default to 'pre_registered'
+            let isScanning = false; // <-- *** NEW: Scanner Guard ***
             
             // --- Initialize Firebase ---
             try {
@@ -135,103 +180,234 @@
                 return;
             }
 
-            // --- 1. Geolocation Logic ---
+            // --- 1. Passcode & QR Logic ---
 
-            function getDistance(lat1, lon1, lat2, lon2) {
-                const R = 6371e3;
-                const φ1 = lat1 * Math.PI / 180;
-                const φ2 = lat2 * Math.PI / 180;
-                const Δφ = (lat2 - lat1) * Math.PI / 180;
-                const Δλ = (lon2 - lon1) * Math.PI / 180;
-                const a = Math.sin(Δφ / 2) * Math.sin(Δφ / 2) +
-                          Math.cos(φ1) * Math.cos(φ2) *
-                          Math.sin(Δλ / 2) * Math.sin(Δλ / 2);
-                const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-                return R * c;
+            // --- *** FIX for html5QrScanner.stop is not a function *** ---
+            function startScanner() {
+                if (isScanning) return; // Don't start if already starting
+                isScanning = true;
+                if (qrScannerModal) qrScannerModal.style.display = 'flex';
+                
+                // Only create a new scanner if one doesn't exist
+                if (!html5QrScanner) {
+                    html5QrScanner = new Html5QrcodeScanner(
+                        "qr-reader-region", 
+                        { fps: 10, qrbox: { width: 250, height: 250 } },
+                        /* verbose= */ false
+                    );
+                }
+                
+                html5QrScanner.render(onScanSuccess, onScanFailure);
             }
 
-            function onGeoSuccess(position) {
-                const { latitude, longitude } = position.coords;
-                const distance = getDistance(latitude, longitude, CLINIC_COORDS.latitude, CLINIC_COORDS.longitude);
-
-                if (distanceEl) distanceEl.textContent = `${distance.toFixed(0)} meters`;
-
-                if (distance <= MAX_DISTANCE_METERS) {
-                    if (geoStatusEl) {
-                        geoStatusEl.textContent = "You are in range!";
-                        geoStatusEl.className = "text-lg font-medium text-emerald-600";
+            async function stopScanner() {
+                isScanning = false; // Set state immediately
+                if (html5QrScanner) {
+                    try {
+                        // Check if scanner is in a scanning state before stopping
+                        if (html5QrScanner.getState() === 2) { // 2 === Html5QrcodeScannerState.SCANNING
+                            await html5QrScanner.stop(); // *** AWAIT the stop promise ***
+                            console.log("Scanner stopped successfully.");
+                        }
+                        html5QrScanner.clear(); // Always clear after
+                    } catch (err) {
+                        console.warn("Error stopping/clearing scanner:", err);
+                        html5QrScanner.clear(); // Fallback to clear
                     }
-                    if (bookingForm) bookingForm.style.display = 'block';
-                    if (joinQueueBtn) joinQueueBtn.disabled = false;
-                } else {
-                    if (geoStatusEl) {
-                        geoStatusEl.textContent = `You are too far away. Move within ${MAX_DISTANCE_METERS}m of the clinic to join the queue.`;
-                        geoStatusEl.className = "text-lg font-medium text-red-600";
-                    }
-                    if (bookingForm) bookingForm.style.display = 'none';
-                    if (joinQueueBtn) joinQueueBtn.disabled = true;
                 }
-                if (loadingOverlay) loadingOverlay.style.display = 'none';
+                if (qrScannerModal) qrScannerModal.style.display = 'none';
             }
             
-            async function loadClinicSettings() {
-                if (!db) return;
+            async function onScanSuccess(decodedText, decodedResult) {
+                if (!isScanning) return; // *** NEW: Guard against multiple calls ***
+                isScanning = false; // Prevent re-entry
+
+                console.log(`Scan result: ${decodedText}`, decodedResult);
+                await stopScanner(); // *** AWAIT the stop *first* ***
+                
                 try {
-                    const settingsRef = doc(db, `artifacts/${appId}/public/data/clinicSettings/settings`);
-                    const settingsDoc = await getDoc(settingsRef);
-                    if (settingsDoc.exists()) {
-                        const data = settingsDoc.data();
-                        if (data.latitude && data.longitude) {
-                            CLINIC_COORDS.latitude = parseFloat(data.latitude);
-                            CLINIC_COORDS.longitude = parseFloat(data.longitude);
+                    // Try to parse as URL
+                    const url = new URL(decodedText);
+                    const pass = url.searchParams.get('pass');
+                    if (pass) {
+                        await checkPasscodeFromURL(pass); // Pass the code to the validator
+                    } else {
+                        showModal("Invalid QR Code. No passcode found.");
+                    }
+                } catch (err) {
+                    // Not a URL, maybe it's just the code?
+                    if(decodedText && decodedText.length < 10 && decodedText.length > 2) {
+                         await checkPasscodeFromURL(decodedText); // Pass the raw text
+                    } else {
+                        showModal("Invalid QR Code scanned.");
+                    }
+                }
+            }
+
+            function onScanFailure(error) {
+                // This is called continuously, so we only log if it's a real error
+                if (!error.includes("No QR code found")) {
+                    console.warn(`QR scan failure: ${error}`);
+                }
+            }
+            
+            // --- *** FIX: This function now ONLY verifies and saves the pass *** ---
+            async function checkPasscodeFromURL(pass) {
+                if (!pass) {
+                    // This handles the initial page load check
+                    const params = new URLSearchParams(window.location.search);
+                    pass = params.get('pass');
+                    if (!pass) return; // No pass in URL, do nothing
+                }
+
+                console.log("Verifying passcode:", pass);
+                try {
+                    const statusRef = doc(db, `artifacts/${appId}/public/data/clinicStatus/status`);
+                    const docSnap = await getDoc(statusRef); // This will error if rules are not set
+
+                    if (docSnap.exists() && docSnap.data().remotePasscode) {
+                        const correctPasscode = docSnap.data().remotePasscode;
+                        clinicPasscode = correctPasscode; 
+
+                        if (pass.toUpperCase() === correctPasscode) {
+                            // Valid pass! Store it for today.
+                            const passData = {
+                                pass: correctPasscode,
+                                date: new Date().toLocaleDateString()
+                            };
+                            localStorage.setItem(DAILY_PASS_KEY, JSON.stringify(passData));
+                            
+                            // *** FIX: Call checkInPreRegisteredUser AFTER auth is ready ***
+                            if (isAuthReady && currentUserId) {
+                                const didCheckIn = await checkInPreRegisteredUser(); 
+                                if (!didCheckIn) {
+                                    // User scanned, is valid, but was not pre-registered.
+                                    // Open the modal for them to join the 'waiting' queue.
+                                    console.log("Valid pass, user not pre-registered. Opening modal for 'waiting' queue.");
+                                    joinMode = 'waiting'; // Set mode to 'waiting'
+                                    if (joinQueueModal) joinQueueModal.style.display = 'flex';
+                                    if (modalStepForm) modalStepForm.style.display = 'block';
+                                    if (modalStepError) modalStepError.style.display = 'none';
+                                } else {
+                                    showModal("Pass verified. You have been checked in!");
+                                }
+                            } else {
+                                showModal("Pass verified successfully! Please log in to continue.");
+                            }
+
+                        } else {
+                            showModal("Invalid or expired passcode provided.");
                         }
-                        if (data.maxDistanceMeters) {
-                            MAX_DISTANCE_METERS = parseInt(data.maxDistanceMeters);
-                        }
+                    } else {
+                        showModal("Could not verify passcode. Clinic status not found.");
                     }
                 } catch (error) {
-                    console.error("Error loading clinic settings:", error);
+                    console.error("Error verifying passcode:", error);
+                    // This is where your "Missing or insufficient permissions" error appears
+                    showModal("Error verifying passcode. Please ensure you have an internet connection.");
+                }
+                // Clean the URL if it was in the query params
+                if (window.location.search.includes('pass=')) {
+                    window.history.replaceState({}, document.title, window.location.pathname);
                 }
             }
             
-            function onGeoError(error) {
-                console.error("Geolocation Error:", error.message);
-                if (geoStatusEl) {
-                    geoStatusEl.textContent = `Could not get your location: ${error.message}`;
-                    geoStatusEl.className = "text-lg font-medium text-red-600";
+            // --- UPDATED: Now returns a boolean ---
+            async function checkInPreRegisteredUser() {
+                if (!currentUserId) return false;
+
+                console.log("Checking in pre-registered user...");
+                const queueCollectionPath = `artifacts/${appId}/public/data/queue`;
+                const q = query(collection(db, queueCollectionPath),
+                                where("patientId", "==", currentUserId),
+                                where("status", "==", "pre_registered"));
+                
+                try {
+                    const querySnapshot = await getDocs(q);
+                    
+                    if (!querySnapshot.empty) {
+                        // User is pre-registered. Let's check them in.
+                        const userDocRef = querySnapshot.docs[0].ref;
+                        await updateDoc(userDocRef, {
+                            status: "waiting", // Move to the live queue
+                            joinedAt: serverTimestamp() // Put them at the end of the line
+                        });
+                        console.log("User successfully checked in from pre_registered.");
+                        return true; // <-- Return true
+                    } else {
+                        console.log("User has a pass, but is not pre-registered. No check-in needed.");
+                        return false; // <-- Return false
+                    }
+                } catch (error) {
+                     console.error("Error during check-in:", error);
+                     return false; // <-- Return false
                 }
-                if (bookingForm) bookingForm.style.display = 'none';
-                if (joinQueueBtn) joinQueueBtn.disabled = true;
-                if (loadingOverlay) loadingOverlay.style.display = 'none';
             }
 
-            function startGeolocationWatch() {
-                if (!navigator.geolocation) {
-                    if (geoStatusEl) geoStatusEl.textContent = "Geolocation is not supported by your browser.";
-                    if (loadingOverlay) loadingOverlay.style.display = 'none';
-                    return;
+            // Checks localStorage and Firestore for a valid pass
+            async function verifyDailyPass() {
+                const passDataString = localStorage.getItem(DAILY_PASS_KEY);
+                if (!passDataString) {
+                    return false; // No pass stored
                 }
-                if (geoStatusEl) geoStatusEl.textContent = "Checking your location...";
-                if (loadingOverlay) loadingOverlay.style.display = 'flex';
 
-                const options = { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 };
-                geoWatchId = navigator.geolocation.watchPosition(onGeoSuccess, onGeoError, options);
+                const passData = JSON.parse(passDataString);
+                const today = new Date().toLocaleDateString();
+
+                // Check if pass is from today
+                if (passData.date !== today) {
+                    localStorage.removeItem(DAILY_PASS_KEY); // Stale pass
+                    return false;
+                }
+
+                // Pass is from today. Now, double-check it with Firestore.
+                try {
+                    if (!clinicPasscode) { // Fetch if not already in memory
+                        const statusRef = doc(db, `artifacts/${appId}/public/data/clinicStatus/status`);
+                        const docSnap = await getDoc(statusRef);
+                        if (docSnap.exists() && docSnap.data().remotePasscode) {
+                            clinicPasscode = docSnap.data().remotePasscode;
+                        }
+                    }
+                    
+                    if (passData.pass === clinicPasscode) {
+                        return true; // Pass is valid and matches Firestore
+                    } else {
+                        localStorage.removeItem(DAILY_PASS_KEY); // Pass is stale/mismatched
+                        return false;
+                    }
+                } catch (error) {
+                    console.error("Error cross-checking passcode:", error);
+                    return false;
+                }
+            }
+            
+            // --- *** THIS IS THE FIX: "Join from Home" button logic *** ---
+            async function handleJoinQueueClick() {
+                // This button is for "Join from Home"
+                // It should ALWAYS register them as 'pre_registered'.
+                
+                if (joinQueueModal) joinQueueModal.style.display = 'flex';
+                
+                // Hide error step, show form step
+                if (modalStepForm) modalStepForm.style.display = 'block';
+                if (modalStepError) modalStepError.style.display = 'none';
+
+                // Set the mode to pre_registered
+                joinMode = 'pre_registered';
+                console.log("Join from Home button clicked. Join mode set to: pre_registered");
             }
 
-            function stopGeolocationWatch() {
-                if (geoWatchId && navigator.geolocation) {
-                    navigator.geolocation.clearWatch(geoWatchId);
-                    geoWatchId = null;
-                }
-            }
 
             // --- 2. Authentication Logic ---
             async function handleLogout() {
                 await signOut(auth);
-                window.location.href = 'index.html'; // Redirect to login page
+                localStorage.removeItem(DAILY_PASS_KEY); // Clear pass on logout
+                // FIX: Use absolute path
+                window.location.href = '/index.html'; 
             }
-
-            // --- 3. Page Navigation Logic (FIXED) ---
+ 
+            // --- 3. Page Navigation Logic (UPDATED) ---
             function showPatientView(pageId) {
                 if (!patientApp) return;
                 patientApp.style.display = 'block';
@@ -241,11 +417,9 @@
                     patientPages[pageId].style.display = 'block';
                 }
 
-                // Clear all active states from bottom nav
                 bottomNavItems.forEach(btn => btn?.classList.remove('bottom-nav-active'));
 
                 // Stop all listeners
-                stopGeolocationWatch();
                 if (clinicStatusUnsubscribe) clinicStatusUnsubscribe();
                 if (patientQueueCountUnsubscribe) patientQueueCountUnsubscribe();
                 if (myQueueUnsubscribe) myQueueUnsubscribe();
@@ -253,21 +427,20 @@
                 if (myAppointmentsUnsubscribe) myAppointmentsUnsubscribe();
                 if (profileUnsubscribe) profileUnsubscribe();
 
-                // Set active states and start listeners for the current page
-                if (pageId === 'book') {
-                    bottomNavBook?.classList.add('bottom-nav-active');
+                if (pageId === 'dashboard') { 
+                    bottomNavDashboard?.classList.add('bottom-nav-active');
                     requestNotificationPermission();
-                    attachClinicStatusListener(); // This will trigger the geo-watch logic
+                    attachClinicStatusListener();
                     attachPatientQueueListener();
                 } else if (pageId === 'history') {
                     bottomNavHistory?.classList.add('bottom-nav-active');
-                    attachHistoryListener();
+                    attachHistoryListener(); 
                 } else if (pageId === 'appointments') {
                     bottomNavAppointments?.classList.add('bottom-nav-active');
-                    attachMyAppointmentListener();
+                    attachMyAppointmentListener(); 
                 } else if (pageId === 'profile') {
                     bottomNavProfile?.classList.add('bottom-nav-active');
-                    attachProfileListener();
+                    attachProfileListener(); 
                 }
             }
 
@@ -295,18 +468,21 @@
                 if (Notification.permission === "granted") {
                     new Notification("It's your turn at MediQueue!", {
                         body: "Please proceed to the doctor's room.",
-                        icon: "/logo.jpg" // Make sure you have this icon
+                        icon: "icon-192x192.png" 
                     });
                 }
             }
 
             function attachClinicStatusListener() {
                 if (!isAuthReady || !db) return;
-                const statusRef = doc(db, `artifacts/${appId}/public/data/clinicSettings/status`);
+                const statusRef = doc(db, `artifacts/${appId}/public/data/clinicStatus/status`);
                 if (clinicStatusUnsubscribe) clinicStatusUnsubscribe(); 
                 clinicStatusUnsubscribe = onSnapshot(statusRef, (docSnap) => {
-                    currentDailyLimit = (docSnap.exists() && docSnap.data().dailyLimit !== undefined) ? parseInt(docSnap.data().dailyLimit) : 999;
-                    if(isNaN(currentDailyLimit)) currentDailyLimit = 999;
+                    if (docSnap.exists()) {
+                        clinicPasscode = docSnap.data().remotePasscode; // Store the passcode
+                        currentDailyLimit = (docSnap.data().dailyLimit !== undefined) ? parseInt(docSnap.data().dailyLimit) : 999;
+                        if(isNaN(currentDailyLimit)) currentDailyLimit = 999;
+                    }
                     attachPatientQueueCountListener();
                 }, (error) => {
                     console.error("[Patient] Error listening to clinic status:", error);
@@ -315,6 +491,7 @@
                 });
             }
 
+            // --- This function's ONLY job is to check if the clinic is full.
             function attachPatientQueueCountListener() {
                 if (!isAuthReady || !db) return;
                 if (patientQueueCountUnsubscribe) patientQueueCountUnsubscribe();
@@ -330,32 +507,31 @@
                                 );
                 patientQueueCountUnsubscribe = onSnapshot(q, (querySnapshot) => {
                     const currentCount = querySnapshot.size;
+                    
                     if (currentCount >= currentDailyLimit) {
-                        if (bookingForm) bookingForm.style.display = 'none';
+                        // Queue is full
+                        if (dashboardJoinQueueBtn) dashboardJoinQueueBtn.style.display = 'none';
+                        if (dashboardScanQRBtn) dashboardScanQRBtn.style.display = 'none';
                         if (queueStatusSection) queueStatusSection.style.display = 'none';
+                        if (dashboardWelcome) dashboardWelcome.style.display = 'none';
+                        if (dashboardShortcuts) dashboardShortcuts.style.display = 'none';
+                        
                         if (queueClosedMsg) {
                             queueClosedMsg.textContent = `The clinic has reached its daily limit of ${currentDailyLimit} patients. Please check back tomorrow.`;
                             queueClosedMsg.style.display = 'block';
                         }
-                        stopGeolocationWatch();
-                        if (geoStatusEl) geoStatusEl.textContent = "The live queue is full for today.";
-                        if (geoStatusEl) geoStatusEl.className = "text-lg font-medium text-blue-600";
-                        if (loadingOverlay) loadingOverlay.style.display = 'none';
                     } else {
+                        // Queue is open
                         if (queueClosedMsg) queueClosedMsg.style.display = 'none';
-                        if (patientPages['book']?.style.display === 'block' && queueStatusSection && !queueStatusSection.classList.contains('active')) {
-                            startGeolocationWatch();
-                        }
+                        // attachPatientQueueListener will handle showing the join button
                     }
                 }, (error) => {
                     console.error("[Patient] Error getting patient queue count:", error);
                     if (queueClosedMsg) queueClosedMsg.style.display = 'none';
-                     if (patientPages['book']?.style.display === 'block' && queueStatusSection && !queueStatusSection.classList.contains('active')) {
-                        startGeolocationWatch();
-                    }
                 });
             }
 
+            // --- UPDATED: This now uses the 'joinMode' variable ---
             async function joinQueue(e) {
                 e.preventDefault();
                 const name = patientNameInput.value.trim();
@@ -367,9 +543,9 @@
                     return;
                 }
 
-                if (joinQueueBtn) {
-                    joinQueueBtn.disabled = true;
-                    joinQueueBtn.textContent = 'Joining...';
+                if (joinQueueBtnModal) {
+                    joinQueueBtnModal.disabled = true;
+                    joinQueueBtnModal.textContent = 'Joining...';
                 }
 
                 try {
@@ -380,98 +556,119 @@
                         mobile: mobile,
                         issue: issue,
                         patientId: currentUserId,
-                        status: 'waiting',
+                        status: joinMode, // <-- *** DYNAMIC STATUS ***
                         joinedAt: serverTimestamp()
                     });
-
-                    if (bookingForm) bookingForm.style.display = 'none';
-                    if (queueStatusSection) {
-                        queueStatusSection.style.display = 'block';
-                        queueStatusSection.classList.add('active');
-                    }
+                    
                     if (patientIssueInput) patientIssueInput.value = '';
                     hasPlayedSound = false;
+                    if (joinQueueModal) joinQueueModal.style.display = 'none'; // Close modal on success
 
                 } catch (error) {
                     console.error("Error joining queue:", error);
                     showModal("Could not join the queue. Please try again.");
                 } finally {
-                    if (joinQueueBtn) {
-                        joinQueueBtn.disabled = false;
-                        joinQueueBtn.textContent = 'Join Queue';
+                    if (joinQueueBtnModal) {
+                        joinQueueBtnModal.disabled = false;
+                        joinQueueBtnModal.textContent = 'Confirm & Join Queue';
                     }
                 }
             }
             
-            // --- THIS IS THE FIX ---
+            // --- UPDATED: This function now controls the dashboard UI ---
             function attachPatientQueueListener() {
                 if (!isAuthReady || !db || !currentUserId) return;
                 const queueCollectionPath = `artifacts/${appId}/public/data/queue`;
+                
+                // --- MODIFIED: Query for *both* statuses ---
                 const q = query(collection(db, queueCollectionPath),
-                                where("status", "==", "waiting"),
+                                where("patientId", "==", currentUserId),
+                                where("status", "in", ["waiting", "pre_registered"]),
                                 orderBy("joinedAt", "asc"));
 
+                if (myQueueUnsubscribe) myQueueUnsubscribe(); 
                 myQueueUnsubscribe = onSnapshot(q, (querySnapshot) => {
                     if (!isAuthReady) return;
-                    let patientQueue = [];
-                    querySnapshot.forEach((doc) => patientQueue.push(doc));
                     
-                    const myIndex = patientQueue.findIndex(doc => doc.data().patientId === currentUserId);
-
-                    if (myIndex !== -1) {
-                        // --- USER IS IN THE QUEUE ---
-                        const myQueueNumber = myIndex + 1;
-                        if (bookingForm) bookingForm.style.display = 'none'; // HIDE FORM
-                        if (queueStatusSection) {
-                            queueStatusSection.style.display = 'block';
-                            queueStatusSection.classList.add('active');
-                        }
-                        if (queueClosedMsg) queueClosedMsg.style.display = 'none';
-                        
-                        const estimate = myIndex * 5; // Simple 5 min per patient estimate
-                        if (queueEstimateEl) queueEstimateEl.textContent = `~ ${estimate} min wait`;
-
-                        if (myQueueNumber === 1) {
-                            if (queueMessageEl) queueMessageEl.textContent = "It's your turn!";
-                            if (queueNumberEl) queueNumberEl.textContent = "Proceed to Doctor";
-                            if (queueEstimateEl) queueEstimateEl.textContent = "You are next!";
-                            if (queueStatusSection) {
-                                queueStatusSection.classList.remove('from-blue-500', 'to-indigo-600');
-                                queueStatusSection.classList.add('from-emerald-500', 'to-teal-600', 'animate-pulse');
-                            }
-                            playNotificationSound();
-                            showTurnNotification();
-                        } else {
-                            if (queueMessageEl) queueMessageEl.textContent = "Your position in queue:";
-                            if (queueNumberEl) queueNumberEl.textContent = `#${myQueueNumber}`;
-                            if (queueStatusSection) {
-                                queueStatusSection.classList.add('from-blue-500', 'to-indigo-600');
-                                queueStatusSection.classList.remove('from-emerald-500', 'to-teal-600', 'animate-pulse');
-                            }
-                            hasPlayedSound = false;
-                        }
-                    } else {
-                        // --- USER IS NOT IN THE QUEUE ---
-                        // The ONLY job here is to hide the status card.
-                        if (queueStatusSection) {
-                            queueStatusSection.style.display = 'none';
-                            queueStatusSection.classList.remove('active');
-                        }
+                    if (querySnapshot.empty) {
+                        // --- USER IS NOT IN ANY QUEUE ---
+                        if (queueStatusSection) queueStatusSection.style.display = 'none';
+                        if (dashboardWelcome) dashboardWelcome.style.display = 'block';
+                        if (dashboardShortcuts) dashboardShortcuts.style.display = 'block';
                         hasPlayedSound = false;
+                        return;
+                    }
+
+                    // --- USER IS IN A QUEUE ---
+                    const myDoc = querySnapshot.docs[0]; // User can only be in one queue
+                    const myData = myDoc.data();
+                    
+                    // Show status card, hide dashboard
+                    if (queueStatusSection) queueStatusSection.style.display = 'block';
+                    if (dashboardWelcome) dashboardWelcome.style.display = 'none';
+                    if (dashboardShortcuts) dashboardShortcuts.style.display = 'none';
+                    if (queueClosedMsg) queueClosedMsg.style.display = 'none';
+                    if (queueScanCheckinBtn) queueScanCheckinBtn.style.display = 'none'; // Hide by default
+
+                    if (myData.status === 'pre_registered') {
+                        // --- USER IS "EN ROUTE" ---
+                        if (queueMessageEl) queueMessageEl.textContent = "You are Pre-Registered!";
+                        if (queueNumberEl) queueNumberEl.textContent = "En Route";
+                        if (queueEstimateEl) queueEstimateEl.textContent = "Please check in upon arrival.";
+                        if (queueStatusSection) {
+                            queueStatusSection.classList.add('from-purple-500', 'to-pink-600'); // Different color
+                            queueStatusSection.classList.remove('from-emerald-500', 'to-teal-600', 'animate-pulse', 'from-blue-500', 'to-indigo-600');
+                        }
+                        if (queueScanCheckinBtn) queueScanCheckinBtn.style.display = 'block'; // <-- SHOW CHECK-IN BTN
+                        hasPlayedSound = false;
+
+                    } else if (myData.status === 'waiting') {
+                        // --- USER IS IN "LIVE" QUEUE ---
+                        // Need to find their *actual* position
+                        const qWaiting = query(collection(db, queueCollectionPath),
+                                where("status", "==", "waiting"),
+                                orderBy("joinedAt", "asc"));
                         
-                        // All logic for showing/hiding the form has been removed from here.
-                        // The onGeoSuccess and attachPatientQueueCountListener functions
-                        // are the only ones that control the form visibility now.
+                        // We must re-fetch *only* the waiting list to get the position
+                        getDocs(qWaiting).then(waitingSnapshot => {
+                            let patientQueue = [];
+                            waitingSnapshot.forEach((doc) => patientQueue.push(doc.id));
+                            const myIndex = patientQueue.findIndex(id => id === myDoc.id);
+                            
+                            if (myIndex === -1) return; // Should not happen
+
+                            const myQueueNumber = myIndex + 1;
+                            const estimate = myIndex * 5; 
+                            if (queueEstimateEl) queueEstimateEl.textContent = `~ ${estimate} min wait`;
+
+                            if (myQueueNumber === 1) {
+                                if (queueMessageEl) queueMessageEl.textContent = "It's your turn!";
+                                if (queueNumberEl) queueNumberEl.textContent = "Proceed to Doctor";
+                                if (queueEstimateEl) queueEstimateEl.textContent = "You are next!";
+                                if (queueStatusSection) {
+                                    queueStatusSection.classList.remove('from-blue-500', 'to-indigo-600', 'from-purple-500', 'to-pink-600');
+                                    queueStatusSection.classList.add('from-emerald-500', 'to-teal-600', 'animate-pulse');
+                                }
+                                playNotificationSound();
+                                showTurnNotification();
+                            } else {
+                                if (queueMessageEl) queueMessageEl.textContent = "Your position in queue:";
+                                if (queueNumberEl) queueNumberEl.textContent = `#${myQueueNumber}`;
+                                if (queueStatusSection) {
+                                    queueStatusSection.classList.add('from-blue-500', 'to-indigo-600');
+                                    queueStatusSection.classList.remove('from-emerald-500', 'to-teal-600', 'animate-pulse', 'from-purple-500', 'to-pink-600');
+                                }
+                                hasPlayedSound = false;
+                            }
+                        });
                     }
                 }, (error) => {
                     console.error("Error with patient queue snapshot:", error);
                 });
             }
-            // --- END OF FIX ---
 
 
-            // --- 5. Patient: Visit History Logic ---
-
+            // --- 5. Patient: Visit History Logic (UPDATED) ---
             function attachHistoryListener() {
                 if (!isAuthReady || !db || !currentUserId) return;
                 const historyCollectionPath = `artifacts/${appId}/users/${currentUserId}/visits`;
@@ -486,21 +683,35 @@
                         querySnapshot.forEach((doc) => {
                             const visit = doc.data();
                             const visitDate = visit.visitedAt?.toDate().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' }) || 'Unknown Date';
+                            
+                            let nextVisitHtml = '';
+                            if (visit.nextVisitDate) {
+                                const nextDate = visit.nextVisitDate.toDate().toLocaleDateString('en-US', {
+                                    weekday: 'long', year: 'numeric', month: 'long', day: 'numeric'
+                                });
+                                nextVisitHtml = `
+                                    <div class="mt-4 pt-4 border-t border-gray-100">
+                                        <p class="text-sm font-semibold text-gray-700">Next Recommended Visit:</p>
+                                        <p class="text-purple-700 font-medium mt-1">${nextDate}</p>
+                                    </div>
+                                `;
+                            }
+
                             const li = document.createElement('li');
                             li.className = 'bg-white shadow-lg rounded-xl p-5 mb-4 animate-fade-in border border-gray-100';
                             li.innerHTML = `
                                 <div class="flex justify-between items-start">
                                     <div>
-                                        <h3 class="text-lg font-semibold text-blue-600">Visit on ${visitDate}</h3>
+                                        <h3 class="text-lg font-semibold text-blue-600">${visitDate}</h3>
                                         <p class="text-gray-600 mt-1"><span class="font-medium">Reason:</span> ${visit.issue || 'N/A'}</p>
                                     </div>
                                     ${visit.fee ? `<p class="text-lg font-bold text-emerald-600">₹${parseFloat(visit.fee).toFixed(2)}</p>` : ''}
                                 </div>
                                 <div class="mt-4 pt-4 border-t border-gray-100">
-                                    <p class="text-gray-800 font-medium">Doctor's Notes:</p>
+                                    <p class="text-sm font-semibold text-gray-700">Doctor's Notes:</p>
                                     <p class="text-gray-700 bg-gray-50 p-3 rounded-md mt-2 whitespace-pre-wrap">${visit.notes || 'No notes provided.'}</p>
                                 </div>
-                            `;
+                                ${nextVisitHtml} `;
                             if (historyList) historyList.appendChild(li);
                         });
                     }
@@ -522,7 +733,6 @@
                 }
             }
 
-            // --- FIXED: handleBookAppointment (Adds status: "pending") ---
             async function handleBookAppointment(e) {
                 e.preventDefault();
                 const dateStr = aptDateInput.value;
@@ -550,12 +760,13 @@
 
                 try {
                     await Tone.start();
-                    await addDoc(collection(db, "appointments"), {
+                    const aptCollectionPath = `artifacts/${appId}/public/data/appointments`;
+                    await addDoc(collection(db, aptCollectionPath), {
                         patientId: currentUserId,
                         patientName: currentUserDisplayName,
                         reason: reason,
                         appointmentAt: Timestamp.fromDate(aptDateTime),
-                        status: "pending" // <-- REQUIRED FIX FOR DOCTOR PAGE
+                        status: "pending" 
                     });
                     showModal("Appointment request sent successfully! The doctor will confirm it shortly.");
                     aptReasonInput.value = '';
@@ -572,10 +783,10 @@
                 }
             }
             
-            // --- FIXED: attachMyAppointmentListener (Shows status) ---
             function attachMyAppointmentListener() {
                 if (!isAuthReady || !db || !currentUserId) return;
-                const q = query(collection(db, "appointments"),
+
+                const q = query(collectionGroup(db, "appointments"),
                                 where("patientId", "==", currentUserId),
                                 orderBy("appointmentAt", "asc"));
 
@@ -615,7 +826,7 @@
                     }
                 }, (error) => {
                     console.error("Error getting my appointments:", error);
-                    if (myAptMsg) myAptMsg.textContent = 'Could not load your appointments.';
+                    if (myAptMsg) myAptMsg.textContent = 'Could not load your appointments. Check console for errors.';
                     if (myAptMsg) myAptMsg.style.display = 'block';
                 });
             }
@@ -702,7 +913,7 @@
             // --- Get All DOM Elements ---
             patientApp = document.getElementById('patient-app');
 
-            patientPages['book'] = document.getElementById('patient-page-book');
+            patientPages['dashboard'] = document.getElementById('patient-page-dashboard'); // <-- Renamed
             patientPages['history'] = document.getElementById('patient-page-history');
             patientPages['appointments'] = document.getElementById('patient-page-appointments');
             patientPages['profile'] = document.getElementById('patient-page-profile');
@@ -712,28 +923,43 @@
             authControls = document.getElementById('auth-controls');
             userDisplay = document.getElementById('user-display');
             logoutBtn = document.getElementById('logout-btn');
+            welcomeHeader = document.getElementById('welcome-header'); // <-- NEW
 
             // Bottom Navbar
             bottomNav = document.getElementById('bottom-nav');
-            bottomNavBook = document.getElementById('bottom-nav-book');
+            bottomNavDashboard = document.getElementById('bottom-nav-dashboard'); // <-- Renamed
             bottomNavAppointments = document.getElementById('bottom-nav-appointments');
             bottomNavHistory = document.getElementById('bottom-nav-history');
             bottomNavProfile = document.getElementById('bottom-nav-profile');
-            bottomNavItems = [bottomNavBook, bottomNavAppointments, bottomNavHistory, bottomNavProfile];
+            bottomNavItems = [bottomNavDashboard, bottomNavAppointments, bottomNavHistory, bottomNavProfile];
 
-            // Patient: Book
-            distanceEl = document.getElementById('distance');
-            geoStatusEl = document.getElementById('geo-status');
-            bookingForm = document.getElementById('booking-form');
-            joinQueueBtn = document.getElementById('join-queue-btn');
-            patientNameInput = document.getElementById('patient-name');
-            patientMobileInput = document.getElementById('patient-mobile');
-            patientIssueInput = document.getElementById('patient-issue');
+            // Patient: Dashboard (Replaces 'Book')
+            dashboardWelcome = document.getElementById('dashboard-welcome');
+            dashboardShortcuts = document.getElementById('dashboard-shortcuts');
+            dashboardJoinQueueBtn = document.getElementById('dashboard-join-queue-btn');
+            dashboardScanQRBtn = document.getElementById('dashboard-scan-qr-btn'); // <-- NEW
             queueStatusSection = document.getElementById('queue-status-section');
             queueMessageEl = document.getElementById('queue-message');
             queueNumberEl = document.getElementById('queue-number');
             queueEstimateEl = document.getElementById('queue-estimate');
-            queueClosedMsg = document.getElementById('queue-closed-msg');
+            queueClosedMsg = document.getElementById('queue-closed-msg'); 
+            queueScanCheckinBtn = document.getElementById('queue-scan-checkin-btn'); // <-- NEW
+
+            // Join Queue Modal
+            joinQueueModal = document.getElementById('join-queue-modal');
+            joinQueueModalClose = document.getElementById('join-queue-modal-close');
+            joinQueueForm = document.getElementById('join-queue-form');
+            joinQueueBtnModal = document.getElementById('join-queue-btn-modal');
+            patientNameInput = document.getElementById('patient-name');
+            patientMobileInput = document.getElementById('patient-mobile');
+            patientIssueInput = document.getElementById('patient-issue');
+            modalStepForm = document.getElementById('modal-step-form');
+            modalStepError = document.getElementById('modal-step-error');
+            modalErrorMsg = document.getElementById('modal-error-msg');
+
+            // --- *** 3. SCANNER JAVASCRIPT: Get Modal Elements *** ---
+            qrScannerModal = document.getElementById('qr-scanner-modal');
+            qrScannerCloseBtn = document.getElementById('qr-scanner-close-btn');
 
             // Patient: History
             historyList = document.getElementById('history-list');
@@ -753,6 +979,7 @@
             profileUpdateBtn = document.getElementById('profile-update-btn');
             profileMsg = document.getElementById('profile-msg');
             mobileLogoutBtn = document.getElementById('mobile-logout-btn');
+            installPwaBtn = document.getElementById('install-pwa-btn'); 
             
             // Global
             loadingOverlay = document.getElementById('loading-overlay');
@@ -764,7 +991,17 @@
             if (logoutBtn) logoutBtn.addEventListener('click', handleLogout); 
             if (mobileLogoutBtn) mobileLogoutBtn.addEventListener('click', handleLogout);
 
-            if (bookingForm) bookingForm.addEventListener('submit', joinQueue);
+            // --- *** 3. SCANNER JAVASCRIPT: Add Listeners *** ---
+            if (dashboardJoinQueueBtn) dashboardJoinQueueBtn.addEventListener('click', handleJoinQueueClick); 
+            if (dashboardScanQRBtn) dashboardScanQRBtn.addEventListener('click', startScanner);
+            if (queueScanCheckinBtn) queueScanCheckinBtn.addEventListener('click', startScanner);
+            if (qrScannerCloseBtn) qrScannerCloseBtn.addEventListener('click', stopScanner);
+
+            if (joinQueueModalClose) joinQueueModalClose.addEventListener('click', () => {
+                if (joinQueueModal) joinQueueModal.style.display = 'none';
+            });
+            if (joinQueueForm) joinQueueForm.addEventListener('submit', joinQueue);
+
 
             if (aptDateInput) aptDateInput.min = new Date().toISOString().split('T')[0];
             if (aptDateInput) aptDateInput.valueAsDate = new Date();
@@ -774,9 +1011,36 @@
             if (profileUpdateBtn) profileUpdateBtn.addEventListener('click', handleProfileUpdate);
 
             if (modalCloseBtn) modalCloseBtn.addEventListener('click', closeModal);
+            
+            // --- PWA Install Prompt Logic ---
+            window.addEventListener('beforeinstallprompt', (e) => {
+                e.preventDefault();
+                deferredInstallPrompt = e;
+                if (installPwaBtn) {
+                    installPwaBtn.classList.remove('hidden');
+                }
+            });
+
+            if (installPwaBtn) {
+                installPwaBtn.addEventListener('click', async () => {
+                    if (!deferredInstallPrompt) return;
+                    deferredInstallPrompt.prompt();
+                    const { outcome } = await deferredInstallPrompt.userChoice;
+                    deferredInstallPrompt = null;
+                    installPwaBtn.classList.add('hidden');
+                });
+            }
+
+            window.addEventListener('appinstalled', () => {
+                deferredInstallPrompt = null;
+                if (installPwaBtn) {
+                    installPwaBtn.classList.add('hidden');
+                }
+            });
+            // --- END OF PWA BLOCK ---
 
             // Page Navigation Listeners (Bottom Nav)
-            if (bottomNavBook) bottomNavBook.addEventListener('click', () => showPatientView('book'));
+            if (bottomNavDashboard) bottomNavDashboard.addEventListener('click', () => showPatientView('dashboard'));
             if (bottomNavAppointments) bottomNavAppointments.addEventListener('click', () => showPatientView('appointments'));
             if (bottomNavHistory) bottomNavHistory.addEventListener('click', () => showPatientView('history'));
             if (bottomNavProfile) bottomNavProfile.addEventListener('click', () => showPatientView('profile'));
@@ -786,21 +1050,30 @@
                 isAuthReady = true;
                 if (user) {
                     if (user.email === ADMIN_EMAIL) {
-                        window.location.href = 'doctor.html';
+                        // FIX: Use absolute path
+                        window.location.href = '/doctor.html';
                         return;
                     }
                     
                     // --- Valid Patient ---
                     currentUserId = user.uid;
                     currentUserEmail = user.email;
-                    currentUserDisplayName = user.displayName;
+                    currentUserDisplayName = user.displayName || user.email.split('@')[0];
 
-                    if (userDisplay) userDisplay.textContent = user.displayName || user.email;
+                    if (userDisplay) userDisplay.textContent = currentUserDisplayName;
+                    if (welcomeHeader) welcomeHeader.textContent = `Welcome, ${currentUserDisplayName}!`; // <-- NEW
                     if (authControls) authControls.style.display = 'flex';
                     if (mainNav) mainNav.style.display = 'flex';
                     if (bottomNav) bottomNav.style.display = 'flex'; 
                     
-                    await loadClinicSettings(); 
+                    // *** FIX: This block now runs AFTER auth is confirmed ***
+                    await checkPasscodeFromURL(); // Check for URL pass first
+                    const hasPass = await verifyDailyPass(); // Check localStorage
+                    if (hasPass) {
+                        // If they have a valid pass, check them in
+                        await checkInPreRegisteredUser(); 
+                    }
+                    // *** END FIX ***
 
                     if (patientNameInput) patientNameInput.value = user.displayName || '';
                     const profileRef = doc(db, `artifacts/${appId}/users/${currentUserId}/profile/details`);
@@ -810,12 +1083,20 @@
                         }
                     });
 
-                    showPatientView('book');
+                    showPatientView('dashboard'); // <-- Default to new dashboard
 
                 } else {
                     // --- Not Logged In ---
                     isAuthReady = false;
-                    window.location.href = 'index.html'; // Redirect to login
+                    
+                    // *** NEW: Check for pass *before* redirecting ***
+                    // This allows a new user to scan the QR and get the pass
+                    await checkPasscodeFromURL();
+                    
+                    // If they are still not logged in, redirect.
+                    if (!auth.currentUser) {
+                         window.location.href = '/index.html'; // FIX: Use absolute path
+                    }
                 }
             });
 
@@ -829,10 +1110,11 @@
             <div id="main-nav" class="flex items-center justify-between h-16" style="display: none;">
                 
                 <div class="flex-shrink-0 flex items-center gap-2">
-                    <img class="h-8 w-auto" src="/logo.jpg" alt="MediQueue Logo">
+                    <!-- FIX: Use absolute path and correct .jpg extension -->
+                    <img class="h-8 w-auto" src="/logo.jpg" alt="MediQueue Logo" onerror="this.style.display='none'">
                     <span class="font-bold text-xl text-blue-600">MediQueue</span>
                 </div>
-
+ 
                 <div id="auth-controls" class="hidden md:flex items-center" style="display: none;">
                     <span id="user-display" class="text-gray-700 text-sm font-medium mr-4">user@example.com</span>
                     <button id="logout-btn" class="bg-red-500 hover:bg-red-600 text-white px-3 py-2 rounded-md text-sm font-medium">Logout</button>
@@ -847,72 +1129,76 @@
 
             <div id="patient-app" style="display: none;">
 
-                <div id="patient-page-book" style="display: none;" class="px-4">
+                <!-- =================================================================== -->
+                <!-- NEW DASHBOARD PAGE (REPLACES 'patient-page-book') -->
+                <!-- =================================================================== -->
+                <div id="patient-page-dashboard" style="display: none;" class="px-4 space-y-6">
                     
+                    <!-- Welcome Header -->
+                    <div id="dashboard-welcome">
+                        <h1 id="welcome-header" class="text-3xl font-bold text-gray-900">Welcome!</h1>
+                        <p class="text-gray-600 mt-1">How can we help you today?</p>
+                    </div>
+                    
+                    <!-- Queue Status Card (Shows *instead* of dashboard when active) -->
                     <div id="queue-status-section" class="mt-2 text-center p-6 sm:p-8 bg-gradient-to-br from-blue-500 to-indigo-600 text-white rounded-2xl shadow-xl" style="display: none;">
                         <h2 id="queue-message" class="text-xl sm:text-2xl font-bold mb-3">Your position in queue:</h2>
                         <p id="queue-number" class="text-7xl font-extrabold my-4">#0</p>
                         <p id="queue-estimate" class="text-lg font-medium opacity-80">~ 0 min wait</p>
+
+                        <!-- *** 2. THE HTML: Button for "En Route" users to scan *** -->
+                        <button id="queue-scan-checkin-btn" type="button" class="mt-4 w-full flex justify-center items-center gap-2 py-3 px-4 border border-white/50 rounded-xl shadow-lg text-sm font-medium text-white bg-white/20 hover:bg-white/30 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-white transition-all transform hover:-translate-y-0.5" style="display: none;">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                            Scan at Clinic to Check In
+                        </button>
                     </div>
-                    
+
+                    <!-- Queue Closed Message (Shows *instead* of dashboard when full) -->
                     <div id="queue-closed-msg" class="text-center p-5 bg-gradient-to-r from-orange-100 to-red-100 text-orange-800 rounded-xl border border-orange-200" style="display: none;">
-                        <svg class="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path>
-                        </svg>
+                        <svg class="w-8 h-8 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"></path></svg>
                         <p class="font-semibold">The live queue is currently closed.</p>
                     </div>
                     
-                    <form id="booking-form" style="display: none;" class="mt-4 bg-white/80 backdrop-blur-sm p-5 sm:p-8 rounded-2xl shadow-xl border border-gray-100 max-w-2xl mx-auto">
-                        <div class="mb-6">
-                            <h2 class="text-2xl sm:text-3xl font-bold bg-gradient-to-r from-blue-600 to-indigo-600 bg-clip-text text-transparent mb-2 flex items-center gap-2">
-                                <svg class="w-7 h-7 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17.657 16.657L13.414 20.9a1.998 1.998 0 01-2.827 0l-4.244-4.243a8 8 0 1111.314 0z"></path>
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 11a3 3 0 11-6 0 3 3 0 016 0z"></path>
-                                </svg>
-                                1. Location Check
-                            </h2>
-                        </div>
-                        <div id="geo-status-container" class="mb-6 p-4 bg-gradient-to-r from-blue-50 to-indigo-50 rounded-xl">
-                            <p class="text-sm text-gray-700 mb-2 flex items-center gap-2">
-                                <svg class="w-4 h-4 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 20l-5.447-2.724A1 1 0 013 16.382V5.618a1 1 0 011.447-.894L9 7m0 13l6-3m-6 3V7m6 10l4.553 2.276A1 1 0 0021 18.382V7.618a1 1 0 00-.553-.894L15 4m0 13V4m0 0L9 7"></path>
-                                </svg>
-                                Distance from clinic: <span id="distance" class="font-bold text-blue-700">- meters</span>
-                            </p>
-                            <p id="geo-status" class="text-base sm:text-lg font-semibold text-blue-600">Checking your location...</p>
-                        </div>
-
-                        <h2 class="text-xl sm:text-2xl font-bold text-gray-900 mb-5 flex items-center gap-2">
-                            <span class="w-8 h-8 rounded-full bg-gradient-to-br from-emerald-500 to-teal-600 flex items-center justify-center text-white font-bold text-sm">2</span>
-                            Join Today's Queue
-                        </h2>
-                        <div class="space-y-4 sm:space-y-5">
-                            <div>
-                                <label for="patient-name" class="block text-sm font-semibold text-gray-700 mb-2">Your Name</label>
-                                <input type="text" id="patient-name" class="w-full px-4 py-3 border-2 border-gray-200 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm sm:text-base transition-all duration-200 bg-gray-50" readonly>
-                            </div>
-                            <div>
-                                <label for="patient-mobile" class="block text-sm font-semibold text-gray-700 mb-2">Mobile No.</label>
-                                <input type="tel" id="patient-mobile" class="w-full px-4 py-3 border-2 border-gray-200 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm sm:text-base transition-all duration-200" placeholder="Your 10-digit mobile number" required>
-                            </div>
-                            <div>
-                                <label for="patient-issue" class="block text-sm font-semibold text-gray-700 mb-2">Reason for Visit</label>
-                                <textarea id="patient-issue" rows="3" class="w-full px-4 py-3 border-2 border-gray-200 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 text-sm sm:text-base transition-all duration-200 resize-none" placeholder="e.g., Fever, checkup..." required></textarea>
-                            </div>
-                            <button id="join-queue-btn" type="submit" disabled class="w-full flex justify-center items-center gap-2 py-3.5 px-6 border border-transparent rounded-xl shadow-lg text-sm sm:text-base font-semibold text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 disabled:cursor-not-allowed focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all duration-200 transform hover:-translate-y-0.5 hover:shadow-xl disabled:transform-none">
-                                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path>
-                                </svg>
-                                Join Queue
+                    <!-- Dashboard Shortcuts (Hidden when in queue or queue is full) -->
+                    <div id="dashboard-shortcuts" class="space-y-6">
+                        <!-- Join Queue Button -->
+                        <div class="grid grid-cols-2 gap-4">
+                            <button id="dashboard-join-queue-btn" type="button" class="w-full flex flex-col items-center justify-center p-6 bg-gradient-to-r from-blue-600 to-indigo-600 text-white rounded-2xl shadow-lg transition-all transform hover:scale-105 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                                <svg class="w-10 h-10 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 20h5v-2a3 3 0 00-5.356-1.857M17 20H7m10 0v-2c0-.656-.126-1.283-.356-1.857M7 20H2v-2a3 3 0 015.356-1.857M7 20v-2c0-.656.126-1.283.356-1.857m0 0a5.002 5.002 0 019.288 0M15 7a3 3 0 11-6 0 3 3 0 016 0zm6 3a2 2 0 11-4 0 2 2 0 014 0zM7 10a2 2 0 11-4 0 2 2 0 014 0z"></path></svg>
+                                <h2 class="text-lg font-bold">Join Live Queue</h2>
+                                <p class="text-xs opacity-80">(From Home)</p>
+                            </button>
+                            <!-- *** 2. THE HTML: Button to open scanner *** -->
+                            <button id="dashboard-scan-qr-btn" type="button" class="w-full flex flex-col items-center justify-center p-6 bg-gradient-to-r from-emerald-500 to-green-600 text-white rounded-2xl shadow-lg transition-all transform hover:scale-105 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:ring-offset-2">
+                                <svg class="w-10 h-10 mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"></path></svg>
+                                <h2 class="text-lg font-bold">Scan at Clinic</h2>
+                                <p class="text-xs opacity-80">(Check In)</p>
                             </button>
                         </div>
-                    </form>
+
+                        <!-- Shortcut Cards -->
+                        <div class="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                            <button onclick="document.getElementById('bottom-nav-appointments').click()" class="flex items-center gap-4 p-4 bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg border border-gray-100 transition-all transform hover:scale-105 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                                <div class="flex-shrink-0 w-10 h-10 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center">
+                                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
+                                </div>
+                                <p class="font-semibold text-gray-800">Book Appointment</p>
+                            </button>
+                            <button onclick="document.getElementById('bottom-nav-history').click()" class="flex items-center gap-4 p-4 bg-white/80 backdrop-blur-sm rounded-2xl shadow-lg border border-gray-100 transition-all transform hover:scale-105 hover:shadow-xl focus:outline-none focus:ring-2 focus:ring-blue-500 focus:ring-offset-2">
+                                <div class="flex-shrink-0 w-10 h-10 rounded-lg bg-blue-100 text-blue-600 flex items-center justify-center">
+                                    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H7a3 3 0 00-3 3v8a3 3 0 003 3z"></path></svg>
+                                </div>
+                                <p class="font-semibold text-gray-800">View My History</p>
+                            </button>
+                        </div>
+                    </div>
+
                 </div>
                 
                 <div id="patient-page-appointments" style="display: none;" class="px-4">
                     <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
                         <div class="bg-white/80 backdrop-blur-sm p-5 sm:p-6 rounded-2xl shadow-xl border border-gray-100">
-                            <h2 class="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+                            <h2 class="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-3">
                                 <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
                                 Book a Future Slot
                             </h2>
@@ -938,7 +1224,7 @@
                         </div>
                         
                         <div class="bg-white/80 backdrop-blur-sm p-5 sm:p-6 rounded-2xl shadow-xl border border-gray-100">
-                            <h2 class="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+                            <h2 class="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-3">
                                 <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
                                 My Bookings
                             </h2>
@@ -946,14 +1232,14 @@
                                 You have no upcoming appointments.
                             </div>
                             <ul id="my-apt-list" class="space-y-4 max-h-96 overflow-y-auto custom-scrollbar">
-                                </ul>
+                            </ul>
                         </div>
                     </div>
                 </div>
 
                 <div id="patient-page-history" style="display: none;" class="px-4">
                     <div class="bg-white/80 backdrop-blur-sm p-5 sm:p-6 rounded-2xl shadow-xl border border-gray-100 max-w-3xl mx-auto">
-                        <h2 class="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+                        <h2 class="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-3">
                             <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 10h18M7 15h1m4 0h1m-7 4h12a3 3 0 003-3V8a3 3 0 00-3-3H7a3 3 0 00-3 3v8a3 3 0 003 3z"></path></svg>
                             My Visit History
                         </h2>
@@ -961,13 +1247,13 @@
                             You have no visit history. Notes from your completed visits will appear here.
                         </div>
                         <ul id="history-list" class="space-y-4">
-                            </ul>
+                        </ul>
                     </div>
                 </div>
                 
                 <div id="patient-page-profile" style="display: none;" class="px-4">
                     <div class="bg-white/80 backdrop-blur-sm p-5 sm:p-6 rounded-2xl shadow-xl border border-gray-100 max-w-lg mx-auto">
-                        <h2 class="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-2">
+                        <h2 class="text-2xl font-bold text-gray-900 mb-4 flex items-center gap-3">
                             <svg class="w-6 h-6 text-blue-600" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"></path></svg>
                             My Profile
                         </h2>
@@ -986,6 +1272,11 @@
                             <div id="profile-msg" class="text-sm text-center" style="display: none;"></div>
                         </form>
                         <hr class="my-6">
+
+                        <button id="install-pwa-btn" type="button" class="w-full hidden flex justify-center items-center gap-2 py-3 px-4 border border-transparent rounded-xl shadow-lg text-sm font-medium text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all transform hover:-translate-y-0.5 mb-4">
+                            <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"></path></svg>
+                            Install App on this Phone
+                        </button>
                         <button id="mobile-logout-btn" class="w-full flex justify-center items-center gap-2 py-3 px-4 border border-transparent rounded-xl shadow-lg text-sm font-medium text-white bg-gradient-to-r from-red-500 to-red-600 hover:from-red-600 hover:to-red-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-red-500 transition-all transform hover:-translate-y-0.5 md:hidden">
                             <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path></svg>
                             Logout
@@ -998,9 +1289,9 @@
     </main>
 
     <nav id="bottom-nav" class="fixed bottom-0 left-0 right-0 h-16 bg-white/90 backdrop-blur-md border-t border-gray-200 flex md:hidden z-40" style="display: none;">
-        <button id="bottom-nav-book" class="flex-1 flex flex-col items-center justify-center p-2 text-sm font-medium text-gray-500 hover:text-blue-600 transition-all duration-150">
-            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 12l2-2m0 0l7-7 7 7M5 10v10a1 1 0 001 1h3m10-11l2 2m-2-2v10a1 1 0 01-1 1h-3m-6-4h.01M12 12h.01M15 12h.01M12 15h.01M15 15h.01M9 15h.01"></path></svg>
-            <span class="text-xs">Home</span>
+        <button id="bottom-nav-dashboard" class="flex-1 flex flex-col items-center justify-center p-2 text-sm font-medium text-gray-500 hover:text-blue-600 transition-all duration-150">
+            <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"></path></svg>
+            <span class="text-xs">Dashboard</span>
         </button>
         <button id="bottom-nav-appointments" class="flex-1 flex flex-col items-center justify-center p-2 text-sm font-medium text-gray-500 hover:text-blue-600 transition-all duration-150">
             <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>
@@ -1020,6 +1311,7 @@
         <div class="animate-spin rounded-full h-16 w-16 border-t-4 border-b-4 border-white"></div>
     </div>
 
+    <!-- General Purpose Modal -->
     <div id="modal" class="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50 p-4" style="display: none;">
         <div class="bg-white p-6 rounded-2xl shadow-xl max-w-sm w-full mx-4 animate-fade-in">
             <h3 class="text-lg font-medium text-gray-900">Notification</h3>
@@ -1032,5 +1324,64 @@
         </div>
     </div>
 
+    <!-- *** Join Queue Modal *** -->
+    <div id="join-queue-modal" class="fixed inset-0 bg-gray-900 bg-opacity-60 backdrop-blur-sm flex items-center justify-center z-50 p-4" style="display: none;">
+        <div class="bg-white p-6 rounded-2xl shadow-xl max-w-md w-full mx-4 animate-fade-in">
+            
+            <!-- Error Step -->
+            <div id="modal-step-error" style="display: none;">
+                <div class="flex flex-col items-center justify-center py-8">
+                    <svg class="w-16 h-16 text-red-500" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"></path></svg>
+                    <p id="modal-error-msg" class="text-gray-700 font-medium mt-4 text-center">Please scan the QR code at the clinic to join.</p>
+                    <button id="join-queue-modal-close" type="button" class="mt-6 inline-flex justify-center px-4 py-2 text-sm font-medium text-white bg-blue-600 border border-transparent rounded-md hover:bg-blue-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500">
+                        OK
+                    </button>
+                </div>
+            </div>
+
+            <!-- Form Step -->
+            <div id="modal-step-form" style="display: none;">
+                <h3 class="text-2xl font-bold text-gray-900 mb-4">Join Live Queue</h3>
+                <form id="join-queue-form" class="space-y-4">
+                    <div>
+                        <label for="patient-name" class="block text-sm font-semibold text-gray-700 mb-2">Your Name</label>
+                        <input type="text" id="patient-name" class="w-full px-4 py-3 border-2 border-gray-200 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 bg-gray-50" readonly>
+                    </div>
+                    <div>
+                        <label for="patient-mobile" class="block text-sm font-semibold text-gray-700 mb-2">Mobile No.</label>
+                        <input type="tel" id="patient-mobile" class="w-full px-4 py-3 border-2 border-gray-200 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200" placeholder="Your 10-digit mobile number" required>
+                    </div>
+                    <div>
+                        <label for="patient-issue" class="block text-sm font-semibold text-gray-700 mb-2">Reason for Visit</label>
+                        <textarea id="patient-issue" rows="3" class="w-full px-4 py-3 border-2 border-gray-200 rounded-xl shadow-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-blue-500 transition-all duration-200 resize-none" placeholder="e.g., Fever, checkup..." required></textarea>
+                    </div>
+                    <button id="join-queue-btn-modal" type="submit" class="w-full flex justify-center items-center gap-2 py-3.5 px-6 border border-transparent rounded-xl shadow-lg text-base font-semibold text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 disabled:from-gray-400 disabled:to-gray-500 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all duration-200 transform hover:-translate-y-0.5 hover:shadow-xl">
+                        Confirm & Join Queue
+                    </button>
+                </form>
+            </div>
+
+        </div>
+    </div>
+
+    <!-- *** 2. THE HTML: The Modal for the Scanner *** -->
+    <div id="qr-scanner-modal" class="fixed inset-0 z-50 flex items-center justify-center p-4" style="display: none;">
+        <!-- Close button (backdrop) -->
+        <div class="absolute inset-0 bg-black/80 backdrop-blur-sm" onclick="document.getElementById('qr-scanner-close-btn').click()"></div>
+        
+        <div id="qr-reader" class="relative z-10 w-full max-w-md bg-white rounded-2xl shadow-xl overflow-hidden animate-fade-in">
+            <button id="qr-scanner-close-btn" type="button" class="absolute top-2 right-2 z-20 p-2 bg-white/50 rounded-full text-gray-700 hover:bg-white">
+                <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"></path></svg>
+            </button>
+            <div class="p-4 bg-gray-100 border-b border-gray-200">
+                <h3 class="text-lg font-semibold text-center text-gray-800">Scan Clinic QR Code</h3>
+            </div>
+            <!-- This div is where the camera feed will appear -->
+            <div id="qr-reader-region" class="w-full"></div>
+            <p class="text-center text-sm text-gray-500 p-4">Align the QR code within the frame to check in.</p>
+        </div>
+    </div>
+
 </body>
 </html>
+

@@ -3,12 +3,27 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MediQueue - Login</title>
+    <meta name="theme-color" content="#3b82f6" />
+    <link rel="manifest" href="/manifest.json">
+    <link rel="apple-touch-icon" href="/icon-192x192.png">
+    <title>MediQue - Login</title>
     <script src="https://cdn.tailwindcss.com"></script>
     <style>
+        @keyframes fadeIn {
+            from { opacity: 0; transform: translateY(-10px); }
+            to { opacity: 1; transform: translateY(0); }
+        }
+        .animate-fade-in { animation: fadeIn 0.3s ease-out; }
         body {
             background: linear-gradient(to bottom right, #f8fafc, #e0e7ff);
-            min-height: 100vh;
+        }
+        input {
+            font-size: 16px !important;
+        }
+        button {
+            -webkit-tap-highlight-color: transparent;
+            user-select: none;
+            -webkit-user-select: none;
         }
     </style>
     <script type="module">
@@ -19,15 +34,11 @@
             setPersistence,
             browserLocalPersistence,
             onAuthStateChanged,
-            createUserWithEmailAndPassword,
             signInWithEmailAndPassword,
-            updateProfile
+            createUserWithEmailAndPassword,
+            updateProfile,
+            sendPasswordResetEmail
         } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
-        import {
-            getFirestore,
-            doc,
-            setDoc
-        } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
 
         // --- App Configuration ---
         const firebaseConfig = {
@@ -39,217 +50,300 @@
           appId: "1:507656529909:web:ccea008f4a1178bf0da2bc",
           measurementId: "G-RX4KHQRQMJ"
         };
-        const appId = firebaseConfig.projectId;
         const ADMIN_EMAIL = "prajansanjayko@gmail.com";
 
-        // --- Initialization ---
         window.onload = async () => {
-            // DOM Elements
-            let db, auth;
+            // --- PWA Service Worker Registration ---
+            if ('serviceWorker' in navigator) {
+                try {
+                    await navigator.serviceWorker.register('/sw.js');
+                    console.log('Service Worker registered successfully');
+                } catch (err) {
+                    console.error('Service Worker registration failed:', err);
+                }
+            }
 
-            // Login
-            let loginTitle, authForm, nameFieldContainer, authName, authEmail, authPassword, authError, authSubmitBtn, authToggleText, authToggleBtn;
+            let auth;
 
-            // Global Utilities
-            let modal, modalMessage, modalCloseBtn;
+            // --- DOM Elements ---
+            const loginView = document.getElementById('login-view');
+            const registerView = document.getElementById('register-view');
+            const resetView = document.getElementById('reset-view');
 
-            // App State
-            let isLoginMode = true;
+            const loginForm = document.getElementById('login-form');
+            const registerForm = document.getElementById('register-form');
+            const resetForm = document.getElementById('reset-form');
+            
+            const loginEmailInput = document.getElementById('login-email');
+            const loginPasswordInput = document.getElementById('login-password');
+            
+            const registerNameInput = document.getElementById('register-name');
+            const registerEmailInput = document.getElementById('register-email');
+            const registerPasswordInput = document.getElementById('register-password');
 
-            // --- Initialize Firebase ---
+            const resetEmailInput = document.getElementById('reset-email');
+            
+            const showRegisterBtn = document.getElementById('show-register-btn');
+            const showLoginBtn = document.getElementById('show-login-btn');
+            const showResetBtn = document.getElementById('show-reset-btn');
+            const cancelResetBtn = document.getElementById('cancel-reset-btn');
+
+            const loginBtn = document.getElementById('login-btn');
+            const registerBtn = document.getElementById('register-btn');
+            const resetBtn = document.getElementById('reset-btn');
+
+            const errorMsg = document.getElementById('error-msg');
+            const successMsg = document.getElementById('success-msg');
+
+            // --- Firebase Init ---
             try {
                 const app = initializeApp(firebaseConfig);
-                db = getFirestore(app);
                 auth = getAuth(app);
                 await setPersistence(auth, browserLocalPersistence);
             } catch (error) {
                 console.error("Firebase Init Error:", error);
-                showModal("Error initializing app. Please check your Firebase config and refresh.");
+                showError("Error initializing app. Please refresh.");
                 return;
             }
 
-            // --- Get All DOM Elements ---
-            loginTitle = document.getElementById('login-title');
-            authForm = document.getElementById('auth-form');
-            nameFieldContainer = document.getElementById('name-field-container');
-            authName = document.getElementById('auth-name');
-            authEmail = document.getElementById('auth-email');
-            authPassword = document.getElementById('auth-password');
-            authError = document.getElementById('auth-error');
-            authSubmitBtn = document.getElementById('auth-submit-btn');
-            authToggleText = document.getElementById('auth-toggle-text');
-            authToggleBtn = document.getElementById('auth-toggle-btn');
-            
-            modal = document.getElementById('modal');
-            modalMessage = document.getElementById('modal-message');
-            modalCloseBtn = document.getElementById('modal-close-btn');
-
-            // --- Authentication Logic ---
-
-            function toggleAuthMode() {
-                isLoginMode = !isLoginMode;
-                if (authError) authError.style.display = 'none';
-                if (isLoginMode) {
-                    if (loginTitle) loginTitle.textContent = 'Log In to Your Account';
-                    if (nameFieldContainer) nameFieldContainer.style.display = 'none';
-                    if (authSubmitBtn) authSubmitBtn.textContent = 'Login';
-                    if (authToggleText) authToggleText.textContent = "Don't have an account?";
-                    if (authToggleBtn) authToggleBtn.textContent = 'Sign Up';
-                } else {
-                    if (loginTitle) loginTitle.textContent = 'Create a New Account';
-                    if (nameFieldContainer) nameFieldContainer.style.display = 'flex';
-                    if (authSubmitBtn) authSubmitBtn.textContent = 'Create Account';
-                    if (authToggleText) authToggleText.textContent = 'Already have an account?';
-                    if (authToggleBtn) authToggleBtn.textContent = 'Login';
-                }
-            }
-
-            async function handleAuthSubmit(e) {
-                e.preventDefault();
-                const name = authName.value;
-                const email = authEmail.value;
-                const password = authPassword.value;
-
-                if (!email || !password) {
-                    if (authError) {
-                        authError.textContent = 'Please enter both email and password.';
-                        authError.style.display = 'block';
-                    }
-                    return;
-                }
-
-                if (!isLoginMode && !name) {
-                    if (authError) {
-                        authError.textContent = 'Please enter your name.';
-                        authError.style.display = 'block';
-                    }
-                    return;
-                }
-
-                if (authSubmitBtn) {
-                    authSubmitBtn.disabled = true;
-                    authSubmitBtn.textContent = isLoginMode ? 'Logging in...' : 'Creating...';
-                }
-                if (authError) authError.style.display = 'none';
-
-                try {
-                    if (isLoginMode) {
-                        await signInWithEmailAndPassword(auth, email, password);
-                        // onAuthStateChanged will handle the redirect
-                    } else {
-                        const userCredential = await createUserWithEmailAndPassword(auth, email, password);
-                        await updateProfile(userCredential.user, { displayName: name });
-                        const profileRef = doc(db, `artifacts/${appId}/users/${userCredential.user.uid}/profile/details`);
-                        await setDoc(profileRef, {
-                            name: name,
-                            mobile: ''
-                        });
-                        // onAuthStateChanged will handle the redirect
-                    }
-                } catch (error) {
-                    console.error("Auth Error:", error);
-                    if (authError) {
-                        authError.textContent = error.message;
-                        authError.style.display = 'block';
-                    }
-                    if (authSubmitBtn) {
-                        authSubmitBtn.disabled = false;
-                        authSubmitBtn.textContent = isLoginMode ? 'Login' : 'Create Account';
-                    }
-                }
-            }
-
-            // --- Global Utilities ---
-            function showModal(message) {
-                if (modalMessage) modalMessage.textContent = message;
-                if (modal) modal.style.display = 'flex';
-            }
-
-            function closeModal() {
-                if (modal) modal.style.display = 'none';
-            }
-
-            // --- Add Event Listeners ---
-            if (authForm) authForm.addEventListener('submit', handleAuthSubmit);
-            if (authToggleBtn) authToggleBtn.addEventListener('click', toggleAuthMode);
-            if (modalCloseBtn) modalCloseBtn.addEventListener('click', closeModal);
-
-            // --- NEW Auth State Change Listener (Redirection) ---
+            // --- Auth Guard ---
             onAuthStateChanged(auth, (user) => {
                 if (user) {
-                    // User is logged in, decide where to send them
+                    // User is signed in
                     if (user.email === ADMIN_EMAIL) {
-                        window.location.href = 'doctor.html'; // Redirect to doctor page
+                        window.location.href = 'doctor.html';
                     } else {
-                        window.location.href = 'patient.html'; // Redirect to patient page
+                        window.location.href = 'patient.html';
                     }
-                } else {
-                    // User is logged out, show the login view
-                    // Since this is the only page, we just make sure the form is ready
-                    console.log("User is logged out, showing login view.");
-                    document.getElementById('login-view').style.display = 'flex';
                 }
+                // If user is null, just stay on the login page
             });
 
-        }; // <-- End of window.onload
+            // --- View Switching ---
+            showRegisterBtn.addEventListener('click', () => {
+                loginView.style.display = 'none';
+                resetView.style.display = 'none';
+                registerView.style.display = 'block';
+                hideMessages();
+            });
+
+            showLoginBtn.addEventListener('click', () => {
+                registerView.style.display = 'none';
+                resetView.style.display = 'none';
+                loginView.style.display = 'block';
+                hideMessages();
+            });
+
+            showResetBtn.addEventListener('click', () => {
+                loginView.style.display = 'none';
+                registerView.style.display = 'none';
+                resetView.style.display = 'block';
+                resetEmailInput.value = loginEmailInput.value; // Pre-fill email
+                hideMessages();
+            });
+
+            cancelResetBtn.addEventListener('click', () => {
+                resetView.style.display = 'none';
+                loginView.style.display = 'block';
+                hideMessages();
+            });
+
+            // --- Helper Functions ---
+            function showError(message) {
+                successMsg.style.display = 'none';
+                errorMsg.textContent = message;
+                errorMsg.style.display = 'block';
+            }
+
+            function showSuccess(message) {
+                errorMsg.style.display = 'none';
+                successMsg.textContent = message;
+                successMsg.style.display = 'block';
+            }
+
+            function hideMessages() {
+                errorMsg.style.display = 'none';
+                successMsg.style.display = 'none';
+            }
+
+            function setLoading(button, isLoading) {
+                if (isLoading) {
+                    button.disabled = true;
+                    button.innerHTML = '<div class="animate-spin rounded-full h-5 w-5 border-t-2 border-b-2 border-white mx-auto"></div>';
+                } else {
+                    button.disabled = false;
+                    // Reset button text based on ID
+                    if (button.id === 'login-btn') button.textContent = 'Login';
+                    if (button.id === 'register-btn') button.textContent = 'Create Account';
+                    if (button.id === 'reset-btn') button.textContent = 'Send Reset Link';
+                }
+            }
+
+            // --- Auth Logic ---
+
+            // Login
+            loginForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                hideMessages();
+                setLoading(loginBtn, true);
+
+                const email = loginEmailInput.value;
+                const password = loginPasswordInput.value;
+
+                try {
+                    await signInWithEmailAndPassword(auth, email, password);
+                    // onAuthStateChanged will handle the redirect
+                } catch (error) {
+                    console.error("Login Error:", error);
+                    showError(error.message);
+                }
+                setLoading(loginBtn, false);
+            });
+
+            // Register
+            registerForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                hideMessages();
+                setLoading(registerBtn, true);
+
+                const name = registerNameInput.value.trim();
+                const email = registerEmailInput.value;
+                const password = registerPasswordInput.value;
+
+                if (name.length < 2) {
+                    showError("Please enter your full name.");
+                    setLoading(registerBtn, false);
+                    return;
+                }
+
+                try {
+                    const userCredential = await createUserWithEmailAndPassword(auth, email, password);
+                    // Now update the user's profile
+                    await updateProfile(userCredential.user, {
+                        displayName: name
+                    });
+                    // onAuthStateChanged will handle the redirect
+                } catch (error) {
+                    console.error("Register Error:", error);
+                    showError(error.message);
+                }
+                setLoading(registerBtn, false);
+            });
+
+            // --- Forgot Password Logic ---
+            resetForm.addEventListener('submit', async (e) => {
+                e.preventDefault();
+                hideMessages();
+                setLoading(resetBtn, true);
+
+                const email = resetEmailInput.value;
+
+                try {
+                    await sendPasswordResetEmail(auth, email);
+                    showSuccess("Password reset link sent! Please check your email inbox.");
+                } catch (error) {
+                    console.error("Reset Password Error:", error);
+                    showError(error.message);
+                }
+                setLoading(resetBtn, false);
+            });
+        };
     </script>
 </head>
-<body class="bg-gray-100 font-sans">
+<body class="flex items-center justify-center min-h-screen p-4">
 
-    <main>
-        <div id="login-view" class="min-h-screen flex items-center justify-center py-12 px-4 sm:px-6 lg:px-8" style="display: none;">
-            <div class="max-w-md w-full space-y-8 bg-white p-10 rounded-lg shadow-xl">
+    <div class="w-full max-w-md">
+        <!-- Logo and Title -->
+        <div class="flex flex-col items-center mb-6">
+            <img class="h-16 w-auto" src="/logo.jpg" alt="MediQueue Logo" onerror="this.src='https://placehold.co/100x100/3b82f6/FFFFFF?text=MQ'">
+            <h1 class="text-4xl font-bold text-gray-800 mt-4">MediQueue</h1>
+        </div>
+
+        <!-- Success/Error Messages -->
+        <div id="error-msg" class="hidden p-4 mb-4 text-sm text-red-700 bg-red-100 rounded-lg animate-fade-in" role="alert">
+            Error message goes here.
+        </div>
+        <div id="success-msg" class="hidden p-4 mb-4 text-sm text-green-700 bg-green-100 rounded-lg animate-fade-in" role="alert">
+            Success message goes here.
+        </div>
+
+        <!-- Login View -->
+        <div id="login-view" class="bg-white p-8 rounded-2xl shadow-xl animate-fade-in">
+            <h2 class="text-2xl font-bold text-gray-900 mb-6 text-center">Patient Login</h2>
+            <form id="login-form" class="space-y-4">
                 <div>
-                    <h2 id="login-title" class="mt-6 text-center text-3xl font-extrabold text-gray-900">
-                        Log In to Your Account
-                    </h2>
+                    <label for="login-email" class="block text-sm font-medium text-gray-700">Email Address</label>
+                    <input type="email" id="login-email" class="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
                 </div>
-                <form id="auth-form" class="mt-8 space-y-6">
-                    <input type="hidden" name="remember" value="true">
-                    <div class="rounded-md shadow-sm -space-y-px">
-                        <div id="name-field-container" class="flex-col" style="display: none;">
-                            <label for="auth-name" class="sr-only">Name</label>
-                            <input id="auth-name" name="name" type="text" autocomplete="name" class="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-[hsl(149_52%_46%)] focus:border-[hsl(149_52%_46%)] focus:z-10 sm:text-sm" placeholder="Your Name">
-                        </div>
-                        <div>
-                            <label for="auth-email" class="sr-only">Email address</label>
-                            <input id="auth-email" name="email" type="email" autocomplete="email" required class="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-t-md focus:outline-none focus:ring-[hsl(149_52%_46%)] focus:border-[hsl(149_52%_46%)] focus:z-10 sm:text-sm" placeholder="Email address">
-                        </div>
-                        <div>
-                            <label for="auth-password" class="sr-only">Password</label>
-                            <input id="auth-password" name="password" type="password" autocomplete="current-password" required class="appearance-none rounded-none relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 rounded-b-md focus:outline-none focus:ring-[hsl(149_52%_46%)] focus:border-[hsl(149_52%_46%)] focus:z-10 sm:text-sm" placeholder="Password">
-                        </div>
-                    </div>
-
-                    <div id="auth-error" class="text-red-500 text-sm" style="display: none;"></div>
-
-                    <div>
-                        <button id="auth-submit-btn" type="submit" class="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-[hsl(149_52%_46%)] hover:bg-[hsl(149_52%_40%)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[hsl(149_52%_46%)]">
-                            Login
-                        </button>
-                    </div>
-                </form>
-                <div class="text-sm text-center">
-                    <span id="auth-toggle-text">Don't have an account?</span>
-                    <button id="auth-toggle-btn" class="font-medium text-[hsl(149_52%_46%)] hover:text-[hsl(149_52%_40%)]">
-                        Sign Up
-                    </button>
+                <div>
+                    <label for="login-password" class="block text-sm font-medium text-gray-700">Password</label>
+                    <input type="password" id="login-password" class="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
                 </div>
-            </div>
+                <div class="text-right">
+                    <button type="button" id="show-reset-btn" class="text-sm font-medium text-blue-600 hover:text-blue-500">Forgot Password?</button>
+                </div>
+                <button id="login-btn" type="submit" class="w-full h-12 flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-lg text-base font-medium text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all transform hover:-translate-y-0.5">
+                    Login
+                </button>
+            </form>
+            <p class="mt-6 text-center text-sm text-gray-600">
+                Don't have an account?
+                <button id="show-register-btn" class="font-medium text-blue-600 hover:text-blue-500">
+                    Sign Up
+                </button>
+            </p>
         </div>
 
-        <div id="modal" class="fixed inset-0 bg-gray-900 bg-opacity-50 flex items-center justify-center z-50" style="display: none;">
-            <div class="bg-white p-6 rounded-lg shadow-xl max-w-sm w-full mx-4">
-                <h3 class="text-lg font-medium text-gray-900">Notification</h3>
-                <p id="modal-message" class="mt-2 text-sm text-gray-600">This is an alert message.</p>
-                <div class="mt-4 text-right">
-                    <button id="modal-close-btn" type="button" class="inline-flex justify-center px-4 py-2 text-sm font-medium text-white bg-[hsl(149_52%_46%)] border border-transparent rounded-md hover:bg-[hsl(149_52%_40%)] focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-[hsl(149_52%_46%)]">
-                        OK
-                    </button>
+        <!-- Register View -->
+        <div id="register-view" class="bg-white p-8 rounded-2xl shadow-xl animate-fade-in" style="display: none;">
+            <h2 class="text-2xl font-bold text-gray-900 mb-6 text-center">Create Patient Account</h2>
+            <form id="register-form" class="space-y-4">
+                <div>
+                    <label for="register-name" class="block text-sm font-medium text-gray-700">Full Name</label>
+                    <input type="text" id="register-name" class="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
                 </div>
-            </div>
+                <div>
+                    <label for="register-email" class="block text-sm font-medium text-gray-700">Email Address</label>
+                    <input type="email" id="register-email" class="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                </div>
+                <div>
+                    <label for="register-password" class="block text-sm font-medium text-gray-700">Password</label>
+                    <input type="password" id="register-password" class="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                </div>
+                <button id="register-btn" type="submit" class="w-full h-12 flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-lg text-base font-medium text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all transform hover:-translate-y-0.5">
+                    Create Account
+                </button>
+            </form>
+            <p class="mt-6 text-center text-sm text-gray-600">
+                Already have an account?
+                <button id="show-login-btn" class="font-medium text-blue-600 hover:text-blue-500">
+                    Login
+                </button>
+            </p>
         </div>
-    </main>
+
+        <!-- Reset Password View -->
+        <div id="reset-view" class="bg-white p-8 rounded-2xl shadow-xl animate-fade-in" style="display: none;">
+            <h2 class="text-2xl font-bold text-gray-900 mb-6 text-center">Reset Password</h2>
+            <p class="text-center text-sm text-gray-600 mb-4">Enter your email address and we will send you a link to reset your password.</p>
+            <form id="reset-form" class="space-y-4">
+                <div>
+                    <label for="reset-email" class="block text-sm font-medium text-gray-700">Email Address</label>
+                    <input type="email" id="reset-email" class="mt-1 block w-full px-4 py-3 border border-gray-300 rounded-xl shadow-sm focus:outline-none focus:ring-blue-500 focus:border-blue-500" required>
+                </div>
+                <button id="reset-btn" type="submit" class="w-full h-12 flex justify-center py-3 px-4 border border-transparent rounded-xl shadow-lg text-base font-medium text-white bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-blue-500 transition-all transform hover:-translate-y-0.5">
+                    Send Reset Link
+                </button>
+            </form>
+            <p class="mt-6 text-center text-sm text-gray-600">
+                Remembered your password?
+                <button id="cancel-reset-btn" class="font-medium text-blue-600 hover:text-blue-500">
+                    Login
+                </button>
+            </p>
+        </div>
+
+    </div>
 
 </body>
 </html>

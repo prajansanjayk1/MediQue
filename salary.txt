@@ -1,0 +1,8 @@
+salary
+eb
+rent
+misc
+telephone
+
+
+update to home
